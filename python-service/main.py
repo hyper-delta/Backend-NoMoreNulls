@@ -2,8 +2,27 @@ from fastapi import FastAPI
 import pandas as pd
 import os
 import uvicorn
+import google.generativeai as genai
 
 app = FastAPI()
+
+
+def build_fallback_summary(table_name: str, columns: list[dict]) -> str:
+    primary_keys = [col["name"] for col in columns if col.get("isPrimaryKey")]
+    foreign_keys = [col["name"] for col in columns if col.get("isForeignKey")]
+
+    summary_parts = [
+        f"This table '{table_name}' stores business data with {len(columns)} attributes."
+    ]
+
+    if primary_keys:
+        summary_parts.append(f"Primary key columns: {', '.join(primary_keys)}.")
+
+    if foreign_keys:
+        summary_parts.append(f"Foreign key columns: {', '.join(foreign_keys)}.")
+
+    return " ".join(summary_parts)
+
 
 # ==============================
 # 🤖 AI BUSINESS SUMMARY
@@ -15,7 +34,7 @@ def generate_summary(payload: dict):
     {
       "tableName": "users",
       "columns": [
-        { "name": "id", "type": "int" }
+        { "name": "id", "type": "int", "isPrimaryKey": true, "isForeignKey": false }
       ]
     }
     """
@@ -23,15 +42,54 @@ def generate_summary(payload: dict):
     table_name = payload.get("tableName")
     columns = payload.get("columns", [])
 
-    summary = (
-        f"This table '{table_name}' stores business data "
-        f"with {len(columns)} attributes."
-    )
+    gemini_api_key = os.environ.get("GEMINI_API_KEY")
+    gemini_model = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
 
-    return {
-        "tableName": table_name,
-        "businessSummary": summary
-    }
+    if not gemini_api_key:
+        return {
+            "tableName": table_name,
+            "businessSummary": build_fallback_summary(table_name, columns),
+        }
+
+    genai.configure(api_key=gemini_api_key)
+
+    prompt = f"""
+You are a senior data analyst.
+Write a concise but detailed business-friendly summary for this database table.
+Include likely business purpose, key entities, and how this table might be used in reporting.
+Avoid hallucinations: rely only on provided schema clues and use cautious language ("likely", "appears to").
+
+Table name: {table_name}
+Columns:
+{columns}
+
+Return plain text only (3-6 sentences).
+"""
+
+    try:
+        model = genai.GenerativeModel(gemini_model)
+        response = model.generate_content(prompt)
+
+        summary = ""
+        if response.candidates:
+            parts = response.candidates[0].content.parts
+            summary = "".join(
+                part.text for part in parts if hasattr(part, "text") and part.text
+            ).strip()
+
+        if not summary:
+            summary = build_fallback_summary(table_name, columns)
+
+        return {
+            "tableName": table_name,
+            "businessSummary": summary,
+        }
+    except Exception as error:
+        print(f"Gemini summary error for table {table_name}: {error}")
+        return {
+            "tableName": table_name,
+            "businessSummary": build_fallback_summary(table_name, columns),
+        }
 
 
 # ==============================
@@ -47,7 +105,7 @@ def detect_timestamp_column(df: pd.DataFrame):
         "modified_on",
         "created",
         "created_date",
-        "last_updated_date"
+        "last_updated_date",
     ]
 
     for col in df.columns:
@@ -89,19 +147,18 @@ def analyze_data(payload: dict):
             completeness = df[col].notnull().mean() * 100
             uniqueness = df[col].nunique() / len(df) * 100
 
-            column_metrics.append({
-                "column": col,
-                "completeness": round(completeness, 2),
-                "uniqueness": round(uniqueness, 2)
-            })
+            column_metrics.append(
+                {
+                    "column": col,
+                    "completeness": round(completeness, 2),
+                    "uniqueness": round(uniqueness, 2),
+                }
+            )
 
     # ==============================
     # Freshness
     # ==============================
-    freshness_info = {
-        "lastUpdated": None,
-        "status": "UNKNOWN"
-    }
+    freshness_info = {"lastUpdated": None, "status": "UNKNOWN"}
 
     timestamp_column = detect_timestamp_column(df)
 
@@ -146,7 +203,7 @@ def analyze_data(payload: dict):
         "tableName": table_name,
         "metrics": column_metrics,
         "freshness": freshness_info,
-        "risks": risks
+        "risks": risks,
     }
 
 
