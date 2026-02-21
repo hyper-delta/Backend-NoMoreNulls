@@ -9,6 +9,9 @@ import uvicorn
 app = FastAPI()
 
 
+# ==============================
+# 🔧 HELPERS
+# ==============================
 def normalize_column_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
 
@@ -25,6 +28,7 @@ def build_fallback_summary(table_name: str, columns: list[dict]) -> str:
         if normalize_column_name(col["name"]).endswith("_id")
         or normalize_column_name(col["name"]) == "id"
     ]
+
     timestamp_columns = [
         col["name"]
         for col in columns
@@ -33,6 +37,7 @@ def build_fallback_summary(table_name: str, columns: list[dict]) -> str:
             for token in ["date", "time", "created", "updated", "modified"]
         )
     ]
+
     amount_columns = [
         col["name"]
         for col in columns
@@ -41,6 +46,7 @@ def build_fallback_summary(table_name: str, columns: list[dict]) -> str:
             for token in ["amount", "price", "total", "balance", "cost", "value"]
         )
     ]
+
     status_columns = [
         col["name"]
         for col in columns
@@ -51,58 +57,56 @@ def build_fallback_summary(table_name: str, columns: list[dict]) -> str:
     ]
 
     relationship_signal = (
-        "This table appears to work as a relationship/bridge table because its name and schema suggest links between business entities."
+        "This table appears to function as a relationship or bridge table linking business entities."
         if "relationship" in normalized_table or "mapping" in normalized_table
-        else "This table appears to capture a core business entity or transaction record used by operational workflows."
+        else "This table appears to capture a core business entity or transactional record."
     )
 
     key_structure = (
         f"Primary key columns: {', '.join(primary_keys)}. "
         if primary_keys
-        else "No explicit primary key was detected in metadata, so uniqueness may depend on a composite business key. "
+        else "No explicit primary key detected; uniqueness may rely on composite logic. "
     )
+
     key_structure += (
         f"Foreign key columns: {', '.join(foreign_keys)}."
         if foreign_keys
-        else "No foreign key constraints were found, so relationships may be managed in application logic."
+        else "No foreign key constraints detected."
     )
 
-    analytics_use = (
-        "Likely reporting usage includes entity counts over time, status distribution analysis, and relationship integrity checks across linked tables."
+    column_preview = ", ".join(
+        f"{col['name']} ({col.get('type', 'unknown')})"
+        for col in columns[:12]
     )
+
+    if len(columns) > 12:
+        column_preview += ", ..."
 
     signals = []
     if timestamp_columns:
         signals.append(
-            f"Lifecycle tracking is likely available through timestamp-like columns ({', '.join(timestamp_columns[:6])})."
+            f"Timestamp indicators include: {', '.join(timestamp_columns[:6])}."
         )
     if amount_columns:
         signals.append(
-            f"Financial or numeric performance measures may be present via amount/value columns ({', '.join(amount_columns[:6])})."
+            f"Financial indicators include: {', '.join(amount_columns[:6])}."
         )
     if status_columns:
         signals.append(
-            f"Process-state monitoring is likely possible using status/flag columns ({', '.join(status_columns[:6])})."
+            f"Status indicators include: {', '.join(status_columns[:6])}."
         )
     if id_columns:
         signals.append(
-            f"Entity linkage and drill-down reporting can use identifier columns ({', '.join(id_columns[:8])})."
+            f"Identifier columns include: {', '.join(id_columns[:8])}."
         )
 
-    column_preview = ", ".join(
-        f"{col['name']} ({col.get('type', 'unknown')})" for col in columns[:12]
-    )
-    if len(columns) > 12:
-        column_preview += ", ..."
-
     summary_parts = [
-        f"Table '{table_name}' contains {len(columns)} columns and is likely part of the business data model used for downstream analytics and operational reporting.",
+        f"Table '{table_name}' contains {len(columns)} columns and is likely part of the operational business data model.",
         relationship_signal,
         key_structure,
-        f"Schema preview: {column_preview if column_preview else 'No columns were provided in the payload.'}",
+        f"Schema preview: {column_preview if column_preview else 'No columns provided.'}",
         *signals,
-        analytics_use,
-        "Recommended checks: validate key uniqueness, monitor null rates on business-critical fields, and confirm referential consistency with parent tables before using this table in executive dashboards.",
+        "Recommended checks include validating key uniqueness, monitoring null rates, and verifying referential integrity before use in executive reporting.",
     ]
 
     return " ".join(summary_parts)
@@ -113,15 +117,6 @@ def build_fallback_summary(table_name: str, columns: list[dict]) -> str:
 # ==============================
 @app.post("/generate-summary")
 def generate_summary(payload: dict):
-    """
-    Expected payload:
-    {
-      "tableName": "users",
-      "columns": [
-        { "name": "id", "type": "int", "isPrimaryKey": true, "isForeignKey": false }
-      ]
-    }
-    """
 
     table_name = payload.get("tableName")
     columns = payload.get("columns", [])
@@ -135,42 +130,45 @@ def generate_summary(payload: dict):
             "businessSummary": build_fallback_summary(table_name, columns),
         }
 
+    # Check if Gemini package exists
     if importlib.util.find_spec("google.generativeai") is None:
         return {
             "tableName": table_name,
             "businessSummary": build_fallback_summary(table_name, columns),
         }
 
-    genai = importlib.import_module("google.generativeai")
-    genai.configure(api_key=gemini_api_key)
+    try:
+        genai = importlib.import_module("google.generativeai")
+        genai.configure(api_key=gemini_api_key)
 
-    prompt = f"""
+        prompt = f"""
 You are a senior data architect preparing documentation for business and analytics teams.
-Generate a detailed, useful summary for ONE table using only the schema clues below.
-Do not invent facts; use cautious language like "likely" or "appears to".
+Generate a detailed but grounded summary for ONE database table.
+Use cautious language like "likely" or "appears to".
+Do not invent facts beyond schema clues.
 
-Output requirements:
-- 140-220 words.
-- Single plain-text paragraph (no markdown bullets).
-- Cover: business purpose, key entities, data grain, relationship model, likely reporting use-cases, and data quality risks.
-- Mention primary/foreign key implications when present.
-- Mention any noticeable time/date, status, amount, or identifier signals from columns.
+Requirements:
+- 140–220 words
+- Single plain paragraph
+- Cover business purpose, key entities, relationships, reporting usage, and data risks
 
 Table name: {table_name}
-Columns (JSON-like): {columns}
+Columns: {columns}
 """
 
-    try:
         model = genai.GenerativeModel(gemini_model)
         response = model.generate_content(prompt)
 
         summary = ""
+
         if response.candidates:
             parts = response.candidates[0].content.parts
             summary = "".join(
-                part.text for part in parts if hasattr(part, "text") and part.text
+                part.text for part in parts
+                if hasattr(part, "text") and part.text
             ).strip()
 
+        # Fallback if AI returns weak result
         if not summary or len(summary.split()) < 90:
             summary = build_fallback_summary(table_name, columns)
 
@@ -178,6 +176,7 @@ Columns (JSON-like): {columns}
             "tableName": table_name,
             "businessSummary": summary,
         }
+
     except Exception as error:
         print(f"Gemini summary error for table {table_name}: {error}")
         return {
@@ -191,15 +190,9 @@ Columns (JSON-like): {columns}
 # ==============================
 def detect_timestamp_column(df: pd.DataFrame):
     timestamp_candidates = [
-        "created_at",
-        "created_on",
-        "updated_at",
-        "last_updated",
-        "modified_date",
-        "modified_on",
-        "created",
-        "created_date",
-        "last_updated_date",
+        "created_at", "created_on", "updated_at",
+        "last_updated", "modified_date", "modified_on",
+        "created", "created_date", "last_updated_date"
     ]
 
     for col in df.columns:
@@ -214,26 +207,12 @@ def detect_timestamp_column(df: pd.DataFrame):
 # ==============================
 @app.post("/analyze-data")
 def analyze_data(payload: dict):
-    """
-    Expected payload from Node:
-
-    {
-      "tableName": "users",
-      "rows": [
-        { "id": 1, "name": "John", "created_at": "2024-01-01" }
-      ]
-    }
-    """
 
     table_name = payload.get("tableName")
     rows = payload.get("rows", [])
 
-    # Convert to DataFrame
     df = pd.DataFrame(rows)
 
-    # ==============================
-    # Column Metrics
-    # ==============================
     column_metrics = []
 
     if not df.empty:
@@ -241,17 +220,12 @@ def analyze_data(payload: dict):
             completeness = df[col].notnull().mean() * 100
             uniqueness = df[col].nunique() / len(df) * 100
 
-            column_metrics.append(
-                {
-                    "column": col,
-                    "completeness": round(completeness, 2),
-                    "uniqueness": round(uniqueness, 2),
-                }
-            )
+            column_metrics.append({
+                "column": col,
+                "completeness": round(completeness, 2),
+                "uniqueness": round(uniqueness, 2),
+            })
 
-    # ==============================
-    # Freshness
-    # ==============================
     freshness_info = {"lastUpdated": None, "status": "UNKNOWN"}
 
     timestamp_column = detect_timestamp_column(df)
@@ -266,9 +240,6 @@ def analyze_data(payload: dict):
     else:
         freshness_info["status"] = "NO TIMESTAMP"
 
-    # ==============================
-    # Risks
-    # ==============================
     risks = []
 
     if df.empty:
@@ -277,22 +248,16 @@ def analyze_data(payload: dict):
     for metric in column_metrics:
         if metric["completeness"] < 50:
             risks.append(
-                f"Column '{metric['column']}' has low completeness "
-                f"({metric['completeness']}%)"
+                f"Column '{metric['column']}' has low completeness ({metric['completeness']}%)"
             )
-
         if metric["uniqueness"] < 10:
             risks.append(
-                f"Column '{metric['column']}' has very low uniqueness "
-                f"({metric['uniqueness']}%)"
+                f"Column '{metric['column']}' has very low uniqueness ({metric['uniqueness']}%)"
             )
 
     if freshness_info["status"] == "NO TIMESTAMP":
         risks.append("No timestamp column detected → Freshness unavailable")
 
-    # ==============================
-    # Final Response
-    # ==============================
     return {
         "tableName": table_name,
         "metrics": column_metrics,
