@@ -2,3 +2,4 @@ fastapi
 uvicorn
 pandas
 mysql-connector-python
+google-generativeai
